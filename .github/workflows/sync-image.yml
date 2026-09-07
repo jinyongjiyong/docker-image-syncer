@@ -1,0 +1,122 @@
+name: Bulk Sync Docker Images from File
+
+on:
+  push:
+    paths:
+      - 'images.txt'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. 拉取当前 GitHub 仓库代码
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2. 检查三个 Secrets 是否成功读取
+      # 这里只判断是否为空，不会输出真实值
+      - name: Check Aliyun Secrets
+        shell: bash
+        run: |
+          echo "========== Check Aliyun Secrets =========="
+
+          if [ -z "${{ secrets.ALIYUN_REGISTRY }}" ]; then
+            echo "❌ ALIYUN_REGISTRY = EMPTY"
+          else
+            echo "✅ ALIYUN_REGISTRY exists"
+          fi
+
+          if [ -z "${{ secrets.ALIYUN_USERNAME }}" ]; then
+            echo "❌ ALIYUN_USERNAME = EMPTY"
+          else
+            echo "✅ ALIYUN_USERNAME exists"
+          fi
+
+          if [ -z "${{ secrets.ALIYUN_PASSWORD }}" ]; then
+            echo "❌ ALIYUN_PASSWORD = EMPTY"
+          else
+            echo "✅ ALIYUN_PASSWORD exists"
+          fi
+
+          echo "=========================================="
+
+      # 3. 登录阿里云 ACR
+      - name: Log in to Aliyun ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ALIYUN_REGISTRY }}
+          username: ${{ secrets.ALIYUN_USERNAME }}
+          password: ${{ secrets.ALIYUN_PASSWORD }}
+
+      # 4. 读取 images.txt，逐个同步镜像
+      - name: Read file and Loop Push
+        shell: bash
+        run: |
+          set -u
+
+          # 检查 images.txt 是否存在
+          if [ ! -f "images.txt" ]; then
+            echo "❌ images.txt 文件不存在！"
+            exit 1
+          fi
+
+          echo "========== Start Sync Images =========="
+
+          while IFS= read -r line || [ -n "$line" ]; do
+
+            # 去掉首尾空格
+            FOREIGN_IMAGE=$(echo "$line" | xargs)
+
+            # 跳过空行
+            if [ -z "$FOREIGN_IMAGE" ]; then
+              continue
+            fi
+
+            # 跳过以 # 开头的注释
+            if [[ "$FOREIGN_IMAGE" =~ ^# ]]; then
+              continue
+            fi
+
+            # 获取镜像最后一段
+            # 示例：
+            # zabbix/zabbix-agent:centos-7.4.10
+            # 结果：
+            # zabbix-agent:centos-7.4.10
+            PURE_NAME=$(echo "$FOREIGN_IMAGE" | awk -F'/' '{print $NF}')
+
+            # 拼接阿里云目标镜像地址
+            DOMESTIC_IMAGE="${{ secrets.ALIYUN_REGISTRY }}/xc-ops-space/${PURE_NAME}"
+
+            echo
+            echo "--------------------------------------------------"
+            echo "源镜像: $FOREIGN_IMAGE"
+            echo "目标镜像: $DOMESTIC_IMAGE"
+            echo "--------------------------------------------------"
+
+            # 拉取海外镜像
+            if docker pull "$FOREIGN_IMAGE"; then
+
+              echo "✅ 拉取成功: $FOREIGN_IMAGE"
+
+              # 重新打 Tag
+              docker tag "$FOREIGN_IMAGE" "$DOMESTIC_IMAGE"
+
+              # 推送到阿里云 ACR
+              if docker push "$DOMESTIC_IMAGE"; then
+                echo "✅ 同步成功: $DOMESTIC_IMAGE"
+              else
+                echo "❌ 推送失败: $DOMESTIC_IMAGE"
+                exit 1
+              fi
+
+            else
+              echo "❌ 拉取海外镜像失败: $FOREIGN_IMAGE"
+              exit 1
+            fi
+
+          done < images.txt
+
+          echo
+          echo "========== All Images Synced =========="
